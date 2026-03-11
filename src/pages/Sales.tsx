@@ -27,6 +27,8 @@ interface Sale {
   bill_id?: string; // Added bill_id
   product_id: string;
   quantity: number;
+  sub_qty?: number | null;
+  pcs_per_unit?: number | null;
   unit_price: number;
   total_price: number;
   gst_amount: number | null;
@@ -82,6 +84,11 @@ export default function Sales() {
   const [discountPercentage, setDiscountPercentage] = useState<number>(0);
   // Payment mode state
   const [paymentMode, setPaymentMode] = useState<string>('cash');
+  // Sub quantity state (for loose tablet sales)
+  const [currentSubQty, setCurrentSubQty] = useState<number | ''>('');
+  const [currentPcsPerUnit, setCurrentPcsPerUnit] = useState<number>(10);
+  const [subQtyMap, setSubQtyMap] = useState<Record<string, number>>({});
+  const [pcsPerUnitMap, setPcsPerUnitMap] = useState<Record<string, number>>({});
   // Loading state for recording sale
   const [isRecordingSales, setIsRecordingSales] = useState(false);
 
@@ -117,7 +124,7 @@ export default function Sales() {
         const result = await supabase
           .from('sales')
           .select(`
-            id, bill_id, product_id, quantity, unit_price, total_price, gst_amount, created_at,
+            id, bill_id, product_id, quantity, sub_qty, pcs_per_unit, unit_price, total_price, gst_amount, created_at,
             customer_name, customer_phone, customer_address, prescription_months, months_taken, prescription_notes,
             products(name)
           `, { count: 'exact' })
@@ -139,7 +146,7 @@ export default function Sales() {
           const fallbackRes = await supabase
             .from('sales')
             .select(`
-              id, bill_id, product_id, quantity, unit_price, total_price, gst_amount, created_at,
+              id, bill_id, product_id, quantity, sub_qty, pcs_per_unit, unit_price, total_price, gst_amount, created_at,
               products(name)
             `, { count: 'exact' })
             .order('created_at', { ascending: false })
@@ -154,7 +161,9 @@ export default function Sales() {
               customer_address: null,
               prescription_months: null,
               months_taken: null,
-              prescription_notes: null
+              prescription_notes: null,
+              sub_qty: null,
+              pcs_per_unit: null
             })) as unknown as Sale[];
             totalCount = fallbackRes.count || 0;
           }
@@ -280,9 +289,20 @@ export default function Sales() {
       setSelectedProducts([...selectedProducts, { id: currentProduct, quantity: currentQuantity }]);
     }
 
+    // Save sub qty and pcs per unit for this product
+    if (currentSubQty !== '' && Number(currentSubQty) > 0) {
+      setSubQtyMap(prev => ({ ...prev, [currentProduct]: Number(currentSubQty) }));
+      setPcsPerUnitMap(prev => ({ ...prev, [currentProduct]: currentPcsPerUnit }));
+    } else {
+      setSubQtyMap(prev => { const next = { ...prev }; delete next[currentProduct]; return next; });
+      setPcsPerUnitMap(prev => { const next = { ...prev }; delete next[currentProduct]; return next; });
+    }
+
     // Reset current selection
     setCurrentProduct('');
     setCurrentQuantity(1);
+    setCurrentSubQty('');
+    setCurrentPcsPerUnit(10);
     // Reset search term
     setProductSearchTerm('');
     // Note: We don't reset the custom price here because it's needed for the cart calculation
@@ -291,6 +311,9 @@ export default function Sales() {
 
   const handleRemoveFromCart = (productId: string) => {
     setSelectedProducts(selectedProducts.filter(p => p.id !== productId));
+    // Clean up sub qty and pcs per unit maps
+    setSubQtyMap(prev => { const next = { ...prev }; delete next[productId]; return next; });
+    setPcsPerUnitMap(prev => { const next = { ...prev }; delete next[productId]; return next; });
   };
 
   const handleUpdateQuantity = (productId: string, newQuantity: number) => {
@@ -330,7 +353,12 @@ export default function Sales() {
 
     try {
       // Generate a unique bill ID for this transaction
-      const billId = crypto.randomUUID();
+      const billId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+          const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+          return v.toString(16);
+        });
 
       // Fetch the latest settings to ensure we're using current GST settings
       const settingsRes = await supabase
@@ -353,8 +381,16 @@ export default function Sales() {
 
         // Use custom price if set, otherwise use product's selling price
         const unitPrice = productPrices[item.id] || product.selling_price;
-        // 1st: Amount * Quantity
-        const grossAmount = unitPrice * item.quantity;
+        // 1st: Amount * Quantity (or sub_qty-based pricing)
+        const itemSubQty = subQtyMap[item.id];
+        const itemPcsPerUnit = pcsPerUnitMap[item.id];
+        let grossAmount;
+        if (itemSubQty && itemPcsPerUnit) {
+          // Sub qty mode: price based on individual tablets
+          grossAmount = (unitPrice / itemPcsPerUnit) * itemSubQty;
+        } else {
+          grossAmount = unitPrice * item.quantity;
+        }
 
         // 2nd: Deduct discount
         const discountAmount = (grossAmount * discountPercentage) / 100;
@@ -392,6 +428,8 @@ export default function Sales() {
           product_id: item.id,
           user_id: profile?.id,
           quantity: item.quantity,
+          sub_qty: subQtyMap[item.id] || null,
+          pcs_per_unit: pcsPerUnitMap[item.id] || null,
           unit_price: Math.round(unitPrice * 100) / 100,
           total_price: Math.round(finalTotalPrice), // Round to nearest whole number
           gst_amount: Math.round(finalGstAmount * 100) / 100,
@@ -413,7 +451,7 @@ export default function Sales() {
       if (error && error.message && error.message.includes('column')) {
         console.log('Missing column detected, trying without optional fields');
         const fallbackSalesToInsert = salesToInsert.map(sale => {
-          const { customer_name, customer_phone, customer_address, prescription_months, months_taken, prescription_notes, payment_mode, ...rest } = sale;
+          const { customer_name, customer_phone, customer_address, prescription_months, months_taken, prescription_notes, payment_mode, sub_qty, pcs_per_unit, ...rest } = sale;
           return rest;
         });
 
@@ -466,6 +504,10 @@ export default function Sales() {
       setProductPrices({});
       setCustomGstRates({});
       setPaymentMode('cash');
+      setSubQtyMap({});
+      setPcsPerUnitMap({});
+      setCurrentSubQty('');
+      setCurrentPcsPerUnit(10);
       // Refresh data after recording sale
       fetchData();
     } catch (error: any) {
@@ -497,7 +539,14 @@ export default function Sales() {
       if (product) {
         // Use custom price if set, otherwise use product's selling price
         const unitPrice = productPrices[item.id] || product.selling_price;
-        const grossAmount = unitPrice * item.quantity;
+        const itemSubQty = subQtyMap[item.id];
+        const itemPcsPerUnit = pcsPerUnitMap[item.id];
+        let grossAmount;
+        if (itemSubQty && itemPcsPerUnit) {
+          grossAmount = (unitPrice / itemPcsPerUnit) * itemSubQty;
+        } else {
+          grossAmount = unitPrice * item.quantity;
+        }
 
         // Accumulate subtotal (Gross)
         subtotal += grossAmount;
@@ -541,7 +590,7 @@ export default function Sales() {
       gstAmount: Math.round(totalGstAmount * 100) / 100,
       grandTotal: Math.round(grandTotal) // Round to nearest whole number
     };
-  }, [selectedProducts, products, productPrices, customGstRates, settings, discountPercentage]);
+  }, [selectedProducts, products, productPrices, customGstRates, settings, discountPercentage, subQtyMap, pcsPerUnitMap]);
 
   // Handle page change
   const handlePageChange = (page: number) => {
@@ -571,7 +620,7 @@ SALE RECEIPT
 ====================
 Date: ${saleDate}
 Product: ${targetSale.products?.name}
-Quantity: ${targetSale.quantity}
+Quantity: ${targetSale.quantity}${targetSale.sub_qty ? ` | Sub Qty: ${targetSale.sub_qty}` : ''}
 Unit Price: ₹${targetSale.unit_price.toFixed(2)}
 GST Amount: ₹${(targetSale.gst_amount || 0).toFixed(2)}
 Total Price: ₹${targetSale.total_price.toFixed(2)}
@@ -633,7 +682,7 @@ Thank you for your purchase!
               Record Sale
             </Button>
           </DialogTrigger>
-          <DialogContent className="max-w-2xl w-full mx-4 sm:mx-6 md:mx-8 max-h-[90vh] overflow-y-auto">
+          <DialogContent className="w-[95vw] sm:max-w-2xl max-h-[90vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle className="text-2xl">Record New Sale</DialogTitle>
               <DialogDescription className="text-lg">
@@ -656,6 +705,10 @@ Thank you for your purchase!
                       setProductPrices({});
                       setCustomGstRates({});
                       setDiscountPercentage(0);
+                      setSubQtyMap({});
+                      setPcsPerUnitMap({});
+                      setCurrentSubQty('');
+                      setCurrentPcsPerUnit(10);
                     }}
                     className="text-sm"
                   >
@@ -677,8 +730,15 @@ Thank you for your purchase!
 
                       // Use custom price if set, otherwise use product's selling price
                       const unitPrice = productPrices[item.id] || product.selling_price;
-                      // "Subtotal" here refers to the line total before global discount (but includes tax if inclusive)
-                      const itemSubtotal = unitPrice * item.quantity;
+                      // Calculate subtotal based on sub_qty or regular qty
+                      const cartSubQty = subQtyMap[item.id];
+                      const cartPcsPerUnit = pcsPerUnitMap[item.id];
+                      let itemSubtotal;
+                      if (cartSubQty && cartPcsPerUnit) {
+                        itemSubtotal = (unitPrice / cartPcsPerUnit) * cartSubQty;
+                      } else {
+                        itemSubtotal = unitPrice * item.quantity;
+                      }
 
                       // Use custom GST rate if set, otherwise use default from settings
                       const itemGstRate = customGstRates[item.id] !== undefined ? customGstRates[item.id] : settings?.default_gst_rate || 0;
@@ -709,9 +769,18 @@ Thank you for your purchase!
                         <div key={item.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
                           <div className="flex-1">
                             <div className="font-medium text-lg">{product.name}</div>
+                            {cartSubQty && cartPcsPerUnit && (
+                              <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">
+                                Sub Qty: {cartSubQty} / {cartPcsPerUnit} pcs
+                              </span>
+                            )}
                             <div className="flex items-center gap-2">
                               <div className="text-sm text-muted-foreground">
-                                ₹{unitPrice.toFixed(2)} × {item.quantity} = ₹{itemSubtotal.toFixed(2)}
+                                {cartSubQty && cartPcsPerUnit ? (
+                                  <>₹{unitPrice.toFixed(2)} / {cartPcsPerUnit} × {cartSubQty} = ₹{itemSubtotal.toFixed(2)}</>
+                                ) : (
+                                  <>₹{unitPrice.toFixed(2)} × {item.quantity} = ₹{itemSubtotal.toFixed(2)}</>
+                                )}
                                 {productPrices[item.id] && productPrices[item.id] !== product.selling_price && (
                                   <span className="text-blue-600 font-medium ml-2">(Adjusted)</span>
                                 )}
@@ -868,6 +937,36 @@ Thank you for your purchase!
                       className="py-2 px-3"
                     />
                   </div>
+                </div>
+
+                {/* Sub Qty and Pcs per Unit (Optional - for loose tablet sales) */}
+                <div className="grid gap-4 grid-cols-1 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="currentSubQty" className="text-sm font-medium">Sub Qty <span className="text-muted-foreground text-xs">(Optional - loose tablets)</span></Label>
+                    <Input
+                      id="currentSubQty"
+                      type="number"
+                      min="0"
+                      value={currentSubQty}
+                      onChange={(e) => setCurrentSubQty(e.target.value === '' ? '' : parseInt(e.target.value) || 0)}
+                      placeholder="e.g. 6 tablets"
+                      className="py-2 px-3"
+                    />
+                  </div>
+                  {currentSubQty !== '' && Number(currentSubQty) > 0 && (
+                    <div className="space-y-2">
+                      <Label htmlFor="currentPcsPerUnit" className="text-sm font-medium">Pcs per Unit</Label>
+                      <Input
+                        id="currentPcsPerUnit"
+                        type="number"
+                        min="1"
+                        value={currentPcsPerUnit}
+                        onChange={(e) => setCurrentPcsPerUnit(parseInt(e.target.value) || 10)}
+                        placeholder="e.g. 10"
+                        className="py-2 px-3"
+                      />
+                    </div>
+                  )}
                 </div>
 
                 {currentProduct && (
@@ -1092,6 +1191,10 @@ Thank you for your purchase!
                     setProductPrices({});
                     setCustomGstRates({});
                     setPaymentMode('cash');
+                    setSubQtyMap({});
+                    setPcsPerUnitMap({});
+                    setCurrentSubQty('');
+                    setCurrentPcsPerUnit(10);
                   }}
                   className="flex-1 text-lg py-3 px-6"
                 >
@@ -1159,7 +1262,10 @@ Thank you for your purchase!
                         className="hover:bg-green-50 transition-colors"
                       >
                         <TableCell className="font-medium text-lg py-4">{sale.products?.name}</TableCell>
-                        <TableCell className="text-lg py-4">{sale.quantity}</TableCell>
+                        <TableCell className="text-lg py-4">
+                          {sale.quantity}
+                          {sale.sub_qty && <span className="text-sm text-blue-600 ml-1">| Sub Qty: {sale.sub_qty}</span>}
+                        </TableCell>
                         <TableCell className="text-lg py-4">₹{sale.unit_price}</TableCell>
                         <TableCell className="text-lg py-4">₹{sale.gst_amount?.toFixed(2) || '0.00'}</TableCell>
                         <TableCell className="text-lg py-4 font-bold text-green-600">₹{sale.total_price.toFixed(2)}</TableCell>
@@ -1290,7 +1396,7 @@ Thank you for your purchase!
 
       {/* Sale Detail Modal */}
       <Dialog open={isDetailModalOpen} onOpenChange={setIsDetailModalOpen}>
-        <DialogContent className="max-w-md w-full mx-4 sm:mx-6 md:mx-8 max-h-[90vh] overflow-y-auto">
+        <DialogContent className="w-[95vw] sm:max-w-md max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="text-2xl">Sale Details</DialogTitle>
             <DialogDescription className="text-lg">
@@ -1313,7 +1419,10 @@ Thank you for your purchase!
                     </div>
                     <div>
                       <p className="text-sm text-muted-foreground">Quantity</p>
-                      <p className="font-medium">{selectedSale.quantity}</p>
+                      <p className="font-medium">
+                        {selectedSale.quantity}
+                        {selectedSale.sub_qty && <span className="text-blue-600 ml-1">| Sub Qty: {selectedSale.sub_qty}</span>}
+                      </p>
                     </div>
                     <div>
                       <p className="text-sm text-muted-foreground">Unit Price</p>

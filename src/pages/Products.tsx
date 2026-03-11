@@ -74,6 +74,8 @@ export default function Products() {
   // Filters
   const [expiryFilter, setExpiryFilter] = useState<string>('all');
   const [stockFilter, setStockFilter] = useState<string>('all');
+  const [isSaving, setIsSaving] = useState(false);
+  const [isSavingAll, setIsSavingAll] = useState(false);
 
   const fetchProducts = async () => {
     try {
@@ -162,14 +164,9 @@ export default function Products() {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
 
-    if (!profile?.account_id) {
-      toast({
-        variant: "destructive",
-        title: "Cannot save product",
-        description: "Account context not loaded. Please re-login or try again in a moment.",
-      });
-      return;
-    }
+    if (!profile?.account_id || isSaving) return;
+
+    setIsSaving(true);
 
     const productData = {
       name: formData.get('name') as string,
@@ -218,6 +215,8 @@ export default function Products() {
         title: "Error saving product",
         description: error.message,
       });
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -325,7 +324,12 @@ export default function Products() {
           };
 
           return {
-            id: crypto.randomUUID(),
+            id: (typeof crypto !== 'undefined' && crypto.randomUUID)
+              ? crypto.randomUUID()
+              : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+                const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+              }),
             name: getColumnValue('name') || '',
             sku: getColumnValue('sku') || '',
             hsn_code: getColumnValue('hsn_code') || getColumnValue('hsn code') || '',
@@ -370,14 +374,9 @@ export default function Products() {
 
   const saveAllProducts = async () => {
     if (parsedProducts.length === 0) return;
-    if (!profile?.account_id) {
-      toast({
-        variant: "destructive",
-        title: "Cannot add products",
-        description: "Account context not loaded. Please re-login or try again in a moment.",
-      });
-      return;
-    }
+    if (!profile?.account_id || isSavingAll) return;
+
+    setIsSavingAll(true);
 
     try {
       const productsToInsert = parsedProducts.map(product => ({
@@ -405,6 +404,8 @@ export default function Products() {
         title: "Error adding products",
         description: error.message,
       });
+    } finally {
+      setIsSavingAll(false);
     }
   };
 
@@ -462,9 +463,17 @@ export default function Products() {
               <div className="flex gap-4">
                 <Button
                   onClick={saveAllProducts}
+                  disabled={isSavingAll}
                   className="bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700"
                 >
-                  Save All Products
+                  {isSavingAll ? (
+                    <div className="flex items-center">
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                      Saving All...
+                    </div>
+                  ) : (
+                    "Save All Products"
+                  )}
                 </Button>
                 <Button
                   variant="outline"
@@ -672,9 +681,17 @@ export default function Products() {
               <div className="flex gap-4 pt-4">
                 <Button
                   type="submit"
+                  disabled={isSaving}
                   className="flex-1 text-lg py-3 px-6 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700"
                 >
-                  {editingProduct ? 'Update Product' : 'Add Product'}
+                  {isSaving ? (
+                    <div className="flex items-center justify-center">
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                      Saving...
+                    </div>
+                  ) : (
+                    editingProduct ? 'Update Product' : 'Add Product'
+                  )}
                 </Button>
                 <Button
                   type="button"
@@ -755,7 +772,7 @@ export default function Products() {
               <div className="relative w-full md:w-80">
                 <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground h-5 w-5" />
                 <Input
-                  placeholder="Search products..."
+                  placeholder="      Search products..."
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
                   className="pl-10 text-lg py-3 px-4 w-full"

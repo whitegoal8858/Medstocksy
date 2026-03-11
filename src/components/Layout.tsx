@@ -36,7 +36,7 @@ const AppSidebar = memo(() => {
   const { isOwner, signOut, profile } = useAuth();
   const location = useLocation();
   const [accountName, setAccountName] = useState('My Store');
-  const [userName, setUserName] = useState('Store Owner');
+  const [userName, setUserName] = useState('Manager');
 
   const navItems = ownerNavItems;
 
@@ -47,16 +47,20 @@ const AppSidebar = memo(() => {
         // Fetch account name
         const { data: accountData, error: accountError } = await supabase
           .from('accounts')
-          .select('name')
+          .select('name, manager_name' as any)
           .eq('id', profile.account_id)
           .single();
 
         if (!accountError && accountData) {
-          setAccountName(accountData.name);
-        }
-
-        // Fetch user name from profile
-        if (profile?.email) {
+          const data = accountData as any;
+          setAccountName(data.name);
+          if (data.manager_name) {
+            setUserName(data.manager_name);
+          } else if (profile?.email) {
+            setUserName(profile.email.split('@')[0]);
+          }
+        } else if (profile?.email) {
+          // If manager_name is not found or error, fall back to email
           setUserName(profile.email.split('@')[0]);
         }
       }
@@ -111,7 +115,7 @@ const AppSidebar = memo(() => {
             </div>
             <div className="flex flex-col">
               <div className="font-medium text-sidebar-foreground">{userName}</div>
-              <div className="text-xs text-muted-foreground">Store Owner</div>
+              <div className="text-xs text-muted-foreground">Manager</div>
             </div>
           </div>
           <Button

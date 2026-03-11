@@ -8,14 +8,17 @@ interface SaleItem {
     id: string;
     product_id: string;
     quantity: number;
+    sub_qty?: number | null;
+    pcs_per_unit?: number | null;
     unit_price: number;
     total_price: number;
     gst_amount: number | null;
     product_name: string;
-    batch_number?: string; // Placeholder
-    hsn?: string; // Placeholder
-    expiry?: string; // Placeholder
+    batch_number?: string;
+    hsn?: string;
+    expiry?: string;
     discount_percentage?: number;
+    gst?: number;
 }
 
 interface BillData {
@@ -60,9 +63,9 @@ export default function PrintBill() {
                 const { data: salesData, error: salesError } = await supabase
                     .from('sales')
                     .select(`
-            id, product_id, quantity, unit_price, total_price, gst_amount, created_at,
+            id, product_id, quantity, sub_qty, pcs_per_unit, unit_price, total_price, gst_amount, created_at,
             customer_name, customer_phone, customer_address, prescription_notes, payment_mode, account_id, discount_percentage,
-            products(name)
+            products(name, gst, hsn_code, batch_number, expiry_date)
           `)
                     .eq('bill_id', billId);
 
@@ -87,16 +90,34 @@ export default function PrintBill() {
 
                 // Aggregate bill data
                 const firstItem = itemsData[0];
-                const items: SaleItem[] = itemsData.map((item: any) => ({
-                    id: item.id,
-                    product_id: item.product_id,
-                    quantity: item.quantity,
-                    unit_price: item.unit_price,
-                    total_price: item.total_price,
-                    gst_amount: item.gst_amount,
-                    product_name: item.products?.name || 'Unknown Product',
-                    discount_percentage: item.discount_percentage || 0,
-                }));
+                const items: SaleItem[] = itemsData.map((item: any) => {
+                    let formattedExpiry = '-';
+                    if (item.products?.expiry_date) {
+                        try {
+                            const d = new Date(item.products.expiry_date);
+                            formattedExpiry = `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getFullYear()).slice(2)}`;
+                        } catch (e) {
+                            formattedExpiry = '-';
+                        }
+                    }
+
+                    return {
+                        id: item.id,
+                        product_id: item.product_id,
+                        quantity: item.quantity,
+                        sub_qty: item.sub_qty || null,
+                        pcs_per_unit: item.pcs_per_unit || null,
+                        unit_price: item.unit_price,
+                        total_price: item.total_price,
+                        gst_amount: item.gst_amount,
+                        product_name: item.products?.name || 'Unknown Product',
+                        batch_number: item.products?.batch_number || '-',
+                        hsn: item.products?.hsn_code || '-',
+                        expiry: formattedExpiry,
+                        discount_percentage: item.discount_percentage || 0,
+                        gst: item.products?.gst || 0,
+                    };
+                });
 
                 const subtotal = items.reduce((sum, item) => sum + (item.total_price - (item.gst_amount || 0)), 0);
                 const total_gst = items.reduce((sum, item) => sum + (item.gst_amount || 0), 0);
@@ -253,20 +274,29 @@ export default function PrintBill() {
                         </thead>
                         <tbody>
                             {billData.items.map((item, index) => {
-                                // Calculate GST split (assuming intra-state for now, so 50-50 CGST/SGST)
-                                const gstRate = (item.gst_amount && item.total_price)
-                                    ? ((item.gst_amount / (item.total_price - item.gst_amount)) * 100)
+                                // Reverse-calculate GST rate from stored sale data
+                                // gst_amount = (netAmount * rate) / 100, so rate = (gst_amount * 100) / netAmount
+                                const grossAmount = item.unit_price * item.quantity;
+                                const discountAmt = (grossAmount * (item.discount_percentage || 0)) / 100;
+                                const netAmount = grossAmount - discountAmt;
+                                const rawGstRate = (item.gst_amount && netAmount > 0)
+                                    ? (item.gst_amount * 100) / netAmount
                                     : 0;
-                                const halfGstRate = gstRate / 2;
+                                // Round to nearest 0.5 to align with standard GST slabs (0, 5, 12, 18, 28)
+                                const totalGstRate = Math.round(rawGstRate * 2) / 2;
+                                const halfGstRate = totalGstRate / 2;
 
                                 return (
                                     <tr key={item.id} className="border-b border-gray-200">
                                         <td className="py-2">{index + 1}</td>
                                         <td className="py-2 font-medium">{item.product_name}</td>
-                                        <td className="py-2">-</td> {/* Batch Placeholder */}
-                                        <td className="py-2">-</td> {/* HSN Placeholder */}
-                                        <td className="py-2">-</td> {/* Expiry Placeholder */}
-                                        <td className="py-2 text-center">{item.quantity}</td>
+                                        <td className="py-2 leading-tight uppercase font-medium">{item.batch_number}</td>
+                                        <td className="py-2 uppercase font-medium">{item.hsn}</td>
+                                        <td className="py-2 leading-tight">{item.expiry}</td>
+                                        <td className="py-2 text-center">
+                                            {item.quantity}
+                                            {item.sub_qty && <div className="text-[7px] text-blue-600">Sub: {item.sub_qty}</div>}
+                                        </td>
                                         <td className="py-2 text-right">{item.unit_price.toFixed(2)}</td>
                                         <td className="py-2 text-right">{item.discount_percentage ? item.discount_percentage + '%' : '0'}</td>
                                         <td className="py-2 text-right text-[8px]">{halfGstRate > 0 ? `${halfGstRate.toFixed(1)}%` : '-'}</td>

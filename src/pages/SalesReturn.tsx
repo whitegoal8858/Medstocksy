@@ -15,6 +15,8 @@ interface Sale {
     id: string;
     product_id: string;
     quantity: number;
+    sub_qty?: number | null;
+    pcs_per_unit?: number | null;
     unit_price: number;
     total_price: number;
     gst_amount: number | null;
@@ -55,6 +57,7 @@ export default function SalesReturn() {
     const [selectedSale, setSelectedSale] = useState<Sale | null>(null);
     const [returnQuantity, setReturnQuantity] = useState(1);
     const [returnReason, setReturnReason] = useState('');
+    const [isProcessing, setIsProcessing] = useState(false);
 
     const fetchData = async () => {
         try {
@@ -62,7 +65,7 @@ export default function SalesReturn() {
             const allSalesRes = await supabase
                 .from('sales')
                 .select(`
-          id, product_id, quantity, unit_price, total_price, gst_amount, created_at,
+          id, product_id, quantity, sub_qty, pcs_per_unit, unit_price, total_price, gst_amount, created_at,
           customer_name, customer_phone,
           products(name)
         `)
@@ -71,7 +74,8 @@ export default function SalesReturn() {
 
             if (allSalesRes.error) throw allSalesRes.error;
 
-            const allSales = allSalesRes.data || [];
+            // Cast to any[] to bypass TypeScript errors for sub_qty/pcs_per_unit columns
+            const allSales = (allSalesRes.data || []) as any[];
 
             // Separate sales and returns
             const positiveSales = allSales.filter(s => s.quantity > 0);
@@ -79,7 +83,7 @@ export default function SalesReturn() {
 
             // Simply show all positive sales (actual sales, not returns)
             // Filter out any that have been fully returned by checking if a matching negative entry exists
-            setSales(positiveSales);
+            setSales(positiveSales as unknown as Sale[]);
 
             // Transform negative sales to returns format for display
             const transformedReturns = negativeReturns.map(item => ({
@@ -115,31 +119,39 @@ export default function SalesReturn() {
     const handleReturn = async (e: React.FormEvent) => {
         e.preventDefault();
 
-        if (!selectedSale || returnQuantity <= 0) {
-            toast({
-                variant: "destructive",
-                title: "Invalid return",
-                description: "Please select a valid quantity to return",
-            });
+        if (!selectedSale || returnQuantity <= 0 || isProcessing) {
+            if (!isProcessing && (!selectedSale || returnQuantity <= 0)) {
+                toast({
+                    variant: "destructive",
+                    title: "Invalid return",
+                    description: "Please select a valid quantity to return",
+                });
+            }
             return;
         }
 
-        if (returnQuantity > selectedSale.quantity) {
+        setIsProcessing(true);
+
+        // Use sub_qty for max return quantity when available
+        const maxReturnQty = selectedSale.sub_qty || selectedSale.quantity;
+
+        if (returnQuantity > maxReturnQty) {
             toast({
                 variant: "destructive",
                 title: "Invalid quantity",
-                description: `Cannot return more than ${selectedSale.quantity} items`,
+                description: `Cannot return more than ${maxReturnQty} items`,
             });
             return;
         }
 
         try {
             // Calculate return amount proportionally
-            const returnAmount = (selectedSale.unit_price * returnQuantity);
+            // When sub_qty is present, use it for proportional calculation
+            const effectiveQty = selectedSale.sub_qty || selectedSale.quantity;
+            const totalReturnAmount = (selectedSale.total_price * returnQuantity) / effectiveQty;
             const returnGstAmount = selectedSale.gst_amount
-                ? (selectedSale.gst_amount * returnQuantity) / selectedSale.quantity
+                ? (selectedSale.gst_amount * returnQuantity) / effectiveQty
                 : 0;
-            const totalReturnAmount = returnAmount + returnGstAmount;
 
             // Create a negative sales entry to represent the return
             const returnEntry = {
@@ -164,33 +176,6 @@ export default function SalesReturn() {
             console.log('Return inserted successfully:', data);
             console.log('Return entry details:', returnEntry);
 
-            // Manually update product stock as a fallback
-            // This ensures stock is updated even if the trigger doesn't fire
-            try {
-                const { data: productData, error: productError } = await supabase
-                    .from('products')
-                    .select('quantity')
-                    .eq('id', selectedSale.product_id)
-                    .single();
-
-                if (!productError && productData) {
-                    const newQuantity = productData.quantity + returnQuantity;
-                    
-                    const { error: updateError } = await supabase
-                        .from('products')
-                        .update({ quantity: newQuantity })
-                        .eq('id', selectedSale.product_id);
-
-                    if (updateError) {
-                        console.error('Error updating product stock:', updateError);
-                    } else {
-                        console.log(`Stock updated manually: ${productData.quantity} -> ${newQuantity}`);
-                    }
-                }
-            } catch (stockError) {
-                console.error('Error in manual stock update:', stockError);
-            }
-
             toast({
                 title: "Return processed",
                 description: `Successfully returned ${returnQuantity} item(s) for ₹${totalReturnAmount.toFixed(2)}. Stock has been updated.`,
@@ -210,6 +195,8 @@ export default function SalesReturn() {
                 title: "Error processing return",
                 description: error.message,
             });
+        } finally {
+            setIsProcessing(false);
         }
     };
 
@@ -252,28 +239,30 @@ export default function SalesReturn() {
                     </CardHeader>
                     <CardContent>
                         <div className="rounded-xl border-0 bg-white shadow-lg overflow-hidden">
-                            <Table>
-                                <TableHeader className="bg-gradient-to-r from-red-50 to-orange-50">
-                                    <TableRow>
-                                        <TableHead className="text-lg font-bold text-gray-700">Product</TableHead>
-                                        <TableHead className="text-lg font-bold text-gray-700">Customer</TableHead>
-                                        <TableHead className="text-lg font-bold text-gray-700">Quantity</TableHead>
-                                        <TableHead className="text-lg font-bold text-gray-700">Amount</TableHead>
-                                        <TableHead className="text-lg font-bold text-gray-700">Date</TableHead>
-                                    </TableRow>
-                                </TableHeader>
-                                <TableBody>
-                                    {returns.map((returnItem) => (
-                                        <TableRow key={returnItem.id} className="hover:bg-red-50">
-                                            <TableCell className="font-medium text-lg">{returnItem.products?.name}</TableCell>
-                                            <TableCell className="text-lg">{returnItem.sales?.customer_name || 'Walk-in'}</TableCell>
-                                            <TableCell className="text-lg">{returnItem.return_quantity}</TableCell>
-                                            <TableCell className="text-lg text-red-600">-₹{returnItem.return_amount.toFixed(2)}</TableCell>
-                                            <TableCell className="text-lg">{new Date(returnItem.created_at).toLocaleDateString()}</TableCell>
+                            <div className="max-h-[400px] overflow-y-auto">
+                                <Table>
+                                    <TableHeader className="bg-gradient-to-r from-red-50 to-orange-50 sticky top-0 z-10 shadow-sm">
+                                        <TableRow>
+                                            <TableHead className="text-lg font-bold text-gray-700 bg-transparent">Product</TableHead>
+                                            <TableHead className="text-lg font-bold text-gray-700 bg-transparent">Customer</TableHead>
+                                            <TableHead className="text-lg font-bold text-gray-700 bg-transparent">Quantity</TableHead>
+                                            <TableHead className="text-lg font-bold text-gray-700 bg-transparent">Amount</TableHead>
+                                            <TableHead className="text-lg font-bold text-gray-700 bg-transparent">Date</TableHead>
                                         </TableRow>
-                                    ))}
-                                </TableBody>
-                            </Table>
+                                    </TableHeader>
+                                    <TableBody>
+                                        {returns.map((returnItem) => (
+                                            <TableRow key={returnItem.id} className="hover:bg-red-50">
+                                                <TableCell className="font-medium text-lg">{returnItem.products?.name}</TableCell>
+                                                <TableCell className="text-lg">{returnItem.sales?.customer_name || 'Walk-in'}</TableCell>
+                                                <TableCell className="text-lg">{returnItem.return_quantity}</TableCell>
+                                                <TableCell className="text-lg text-red-600">-₹{returnItem.return_amount.toFixed(2)}</TableCell>
+                                                <TableCell className="text-lg">{new Date(returnItem.created_at).toLocaleDateString()}</TableCell>
+                                            </TableRow>
+                                        ))}
+                                    </TableBody>
+                                </Table>
+                            </div>
                         </div>
                     </CardContent>
                 </Card>
@@ -303,47 +292,50 @@ export default function SalesReturn() {
                         </div>
                     ) : (
                         <div className="rounded-xl border-0 bg-white shadow-lg overflow-hidden">
-                            <Table>
-                                <TableHeader className="bg-gradient-to-r from-gray-50 to-blue-50">
-                                    <TableRow>
-                                        <TableHead className="text-lg font-bold text-gray-700">Product</TableHead>
-                                        <TableHead className="text-lg font-bold text-gray-700">Customer</TableHead>
-                                        <TableHead className="text-lg font-bold text-gray-700">Quantity</TableHead>
-                                        <TableHead className="text-lg font-bold text-gray-700">Amount</TableHead>
-                                        <TableHead className="text-lg font-bold text-gray-700">Date</TableHead>
-                                        <TableHead className="text-lg font-bold text-gray-700">Actions</TableHead>
-                                    </TableRow>
-                                </TableHeader>
-                                <TableBody>
-                                    {filteredSales.map((sale) => (
-                                        <TableRow key={sale.id} className="hover:bg-blue-50">
-                                            <TableCell className="font-medium text-lg">{sale.products?.name}</TableCell>
-                                            <TableCell className="text-lg">{sale.customer_name || 'Walk-in'}</TableCell>
-                                            <TableCell className="text-lg">
-                                                {sale.quantity}
-                                            </TableCell>
-                                            <TableCell className="text-lg">₹{sale.total_price.toFixed(2)}</TableCell>
-                                            <TableCell className="text-lg">{new Date(sale.created_at).toLocaleDateString()}</TableCell>
-                                            <TableCell>
-                                                <Button
-                                                    variant="outline"
-                                                    size="sm"
-                                                    onClick={() => {
-                                                        setSelectedSale(sale);
-                                                        setReturnQuantity(1);
-                                                        setReturnReason('');
-                                                        setIsReturnDialogOpen(true);
-                                                    }}
-                                                    className="text-red-600 border-red-200 hover:bg-red-50"
-                                                >
-                                                    <RotateCcw className="h-4 w-4 mr-1" />
-                                                    Return
-                                                </Button>
-                                            </TableCell>
+                            <div className="max-h-[600px] overflow-y-auto">
+                                <Table>
+                                    <TableHeader className="bg-gradient-to-r from-gray-50 to-blue-50 sticky top-0 z-10 shadow-sm">
+                                        <TableRow>
+                                            <TableHead className="text-lg font-bold text-gray-700 bg-transparent">Product</TableHead>
+                                            <TableHead className="text-lg font-bold text-gray-700 bg-transparent">Customer</TableHead>
+                                            <TableHead className="text-lg font-bold text-gray-700 bg-transparent">Quantity</TableHead>
+                                            <TableHead className="text-lg font-bold text-gray-700 bg-transparent">Amount</TableHead>
+                                            <TableHead className="text-lg font-bold text-gray-700 bg-transparent">Date</TableHead>
+                                            <TableHead className="text-lg font-bold text-gray-700 bg-transparent">Actions</TableHead>
                                         </TableRow>
-                                    ))}
-                                </TableBody>
-                            </Table>
+                                    </TableHeader>
+                                    <TableBody>
+                                        {filteredSales.map((sale) => (
+                                            <TableRow key={sale.id} className="hover:bg-blue-50">
+                                                <TableCell className="font-medium text-lg">{sale.products?.name}</TableCell>
+                                                <TableCell className="text-lg">{sale.customer_name || 'Walk-in'}</TableCell>
+                                                <TableCell className="text-lg">
+                                                    {sale.quantity}
+                                                    {sale.sub_qty && <span className="text-sm text-blue-600 ml-1">| Sub Qty: {sale.sub_qty}</span>}
+                                                </TableCell>
+                                                <TableCell className="text-lg">₹{sale.total_price.toFixed(2)}</TableCell>
+                                                <TableCell className="text-lg">{new Date(sale.created_at).toLocaleDateString()}</TableCell>
+                                                <TableCell>
+                                                    <Button
+                                                        variant="outline"
+                                                        size="sm"
+                                                        onClick={() => {
+                                                            setSelectedSale(sale);
+                                                            setReturnQuantity(1);
+                                                            setReturnReason('');
+                                                            setIsReturnDialogOpen(true);
+                                                        }}
+                                                        className="text-red-600 border-red-200 hover:bg-red-50"
+                                                    >
+                                                        <RotateCcw className="h-4 w-4 mr-1" />
+                                                        Return
+                                                    </Button>
+                                                </TableCell>
+                                            </TableRow>
+                                        ))}
+                                    </TableBody>
+                                </Table>
+                            </div>
                         </div>
                     )}
                 </CardContent>
@@ -351,7 +343,7 @@ export default function SalesReturn() {
 
             {/* Return Dialog */}
             <Dialog open={isReturnDialogOpen} onOpenChange={setIsReturnDialogOpen}>
-                <DialogContent className="max-w-md">
+                <DialogContent className="w-[95vw] sm:max-w-md">
                     <DialogHeader>
                         <DialogTitle className="text-2xl text-red-700">Process Return</DialogTitle>
                         <DialogDescription className="text-lg">
@@ -364,18 +356,21 @@ export default function SalesReturn() {
                                 <div className="p-4 bg-gray-50 rounded-lg">
                                     <h4 className="font-medium text-lg mb-2">Sale Details</h4>
                                     <p className="text-sm text-muted-foreground">Product: {selectedSale.products?.name}</p>
-                                    <p className="text-sm text-muted-foreground">Quantity Sold: {selectedSale.quantity}</p>
+                                    <p className="text-sm text-muted-foreground">
+                                        Quantity Sold: {selectedSale.quantity}
+                                        {selectedSale.sub_qty && <span className="text-blue-600 ml-1">| Sub Qty: {selectedSale.sub_qty}</span>}
+                                    </p>
                                     <p className="text-sm text-muted-foreground">Unit Price: ₹{selectedSale.unit_price.toFixed(2)}</p>
                                     <p className="text-sm text-muted-foreground">Total: ₹{selectedSale.total_price.toFixed(2)}</p>
                                 </div>
 
                                 <div className="space-y-2">
-                                    <Label htmlFor="returnQuantity">Return Quantity (Max: {selectedSale.quantity})</Label>
+                                    <Label htmlFor="returnQuantity">Return Quantity (Max: {selectedSale.sub_qty || selectedSale.quantity})</Label>
                                     <Input
                                         id="returnQuantity"
                                         type="number"
                                         min="1"
-                                        max={selectedSale.quantity}
+                                        max={selectedSale.sub_qty || selectedSale.quantity}
                                         value={returnQuantity}
                                         onChange={(e) => setReturnQuantity(parseInt(e.target.value) || 1)}
                                         className="text-lg"
@@ -396,7 +391,7 @@ export default function SalesReturn() {
                                 <div className="p-4 bg-red-50 rounded-lg">
                                     <h4 className="font-medium text-lg mb-2 text-red-700">Return Summary</h4>
                                     <p className="text-sm">Quantity: {returnQuantity}</p>
-                                    <p className="text-sm">Refund Amount: ₹{(selectedSale.unit_price * returnQuantity + (selectedSale.gst_amount || 0) * returnQuantity / selectedSale.quantity).toFixed(2)}</p>
+                                    <p className="text-sm">Refund Amount: ₹{(selectedSale.total_price * returnQuantity / (selectedSale.sub_qty || selectedSale.quantity)).toFixed(2)}</p>
                                 </div>
                             </div>
 
@@ -412,9 +407,19 @@ export default function SalesReturn() {
                                 <Button
                                     type="submit"
                                     className="flex-1 bg-red-600 hover:bg-red-700"
+                                    disabled={isProcessing}
                                 >
-                                    <RotateCcw className="h-4 w-4 mr-2" />
-                                    Process Return
+                                    {isProcessing ? (
+                                        <div className="flex items-center">
+                                            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                                            Processing...
+                                        </div>
+                                    ) : (
+                                        <>
+                                            <RotateCcw className="h-4 w-4 mr-2" />
+                                            Process Return
+                                        </>
+                                    )}
                                 </Button>
                             </div>
                         </form>
