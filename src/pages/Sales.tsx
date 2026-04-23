@@ -5,9 +5,10 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Pagination, PaginationContent, PaginationEllipsis, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious } from '@/components/ui/pagination';
-import { Plus, ShoppingCart, Package, Eye, Search, Printer, Download, ChevronDown, ChevronRight } from 'lucide-react';
+import { Plus, ShoppingCart, Package, Eye, Search, Printer, Download, ChevronDown, ChevronRight, Receipt } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { supabase } from '@/db conn/supabaseClient';
 import { useToast } from '@/hooks/use-toast';
@@ -40,6 +41,7 @@ interface Sale {
   prescription_months?: number | null;
   months_taken?: number | null;
   prescription_notes?: string | null;
+  payment_mode?: string | null;
   products: {
     name: string;
   };
@@ -82,7 +84,6 @@ export default function Sales() {
   const [customerAddress, setCustomerAddress] = useState('');
   const [prescriptionMonths, setPrescriptionMonths] = useState<number | ''>('');
   const [monthsTaken, setMonthsTaken] = useState<number | ''>(1);
-  const [prescriptionNotes, setPrescriptionNotes] = useState('');
   // Pagination states
   const [currentPage, setCurrentPage] = useState(1);
   const [totalSales, setTotalSales] = useState(0);
@@ -140,7 +141,7 @@ export default function Sales() {
           .from('sales')
           .select(`
             id, bill_id, product_id, quantity, sub_qty, pcs_per_unit, unit_price, total_price, gst_amount, created_at, sale_date,
-            customer_name, customer_phone, customer_address, prescription_months, months_taken, prescription_notes,
+            customer_name, customer_phone, customer_address, prescription_months, months_taken, payment_mode,
             products(name)
           `, { count: 'exact' })
           .order('created_at', { ascending: false })
@@ -161,7 +162,7 @@ export default function Sales() {
           const fallbackRes = await supabase
             .from('sales')
             .select(`
-              id, bill_id, product_id, quantity, sub_qty, pcs_per_unit, unit_price, total_price, gst_amount, created_at, sale_date,
+              id, bill_id, product_id, quantity, sub_qty, pcs_per_unit, unit_price, total_price, gst_amount, created_at, sale_date, payment_mode,
               products(name)
             `, { count: 'exact' })
             .order('created_at', { ascending: false })
@@ -176,7 +177,6 @@ export default function Sales() {
               customer_address: null,
               prescription_months: null,
               months_taken: null,
-              prescription_notes: null,
               sale_date: null,
               sub_qty: null,
               pcs_per_unit: null
@@ -365,6 +365,18 @@ export default function Sales() {
       return;
     }
 
+    // Validation for Credit sales
+    if (paymentMode === 'credit') {
+      if (!customerName.trim() || !customerPhone.trim()) {
+        toast({
+          variant: 'destructive',
+          title: 'Customer Info Required',
+          description: 'Name and Phone number are mandatory for credit sales.',
+        });
+        return;
+      }
+    }
+
     setIsRecordingSales(true);
 
     try {
@@ -416,16 +428,11 @@ export default function Sales() {
         let finalGstAmount = 0;
         let finalTotalPrice = 0;
 
-        // Note: For database storage, we typically store the Final Total Price and the GST component of it.
-
         if (currentSettings?.gst_enabled) {
           if (isGstInclusive) {
-            // Inclusive: User requested calculation is Net Amount * Rate / 100
-            // Although standard accounting is Net - (Net / (1+Rate)), the user specifically requested this flow.
             finalGstAmount = (netAmount * itemGstRate) / 100;
             finalTotalPrice = netAmount;
           } else {
-            // Exclusive: GST is added ON TOP of the Net Amount (which is treated as Base)
             finalGstAmount = (netAmount * itemGstRate) / 100;
             finalTotalPrice = netAmount + finalGstAmount;
           }
@@ -434,9 +441,11 @@ export default function Sales() {
           finalGstAmount = 0;
         }
 
+        const totalPriceRounded = Math.round(finalTotalPrice);
+        const isSettled = paymentMode !== 'credit';
+
         return {
           account_id: profile?.account_id,
-          // @ts-ignore - bill_id might not exist in types yet
           bill_id: billId,
           product_id: item.id,
           user_id: profile?.id,
@@ -444,17 +453,17 @@ export default function Sales() {
           sub_qty: subQtyMap[item.id] || null,
           pcs_per_unit: pcsPerUnitMap[item.id] || null,
           unit_price: Math.round(unitPrice * 100) / 100,
-          total_price: Math.round(finalTotalPrice), // Round to nearest whole number
+          total_price: totalPriceRounded,
           gst_amount: Math.round(finalGstAmount * 100) / 100,
           payment_mode: paymentMode,
-          // Add customer details - use "Walk-in Customer" if name is empty
           customer_name: customerName || "Walk-in Customer",
           customer_phone: customerPhone || null,
           customer_address: customerAddress || null,
           prescription_months: prescriptionMonths === '' ? null : Number(prescriptionMonths),
           months_taken: monthsTaken === '' ? null : Number(monthsTaken),
-          prescription_notes: prescriptionNotes || null,
           discount_percentage: discountPercentage,
+          received_amount: isSettled ? totalPriceRounded : 0,
+          is_settled: isSettled,
         };
       });
 
@@ -464,28 +473,24 @@ export default function Sales() {
       if (error && error.message && error.message.includes('column')) {
         console.log('Missing column detected, trying without optional fields');
         const fallbackSalesToInsert = salesToInsert.map(sale => {
-          const { customer_name, customer_phone, customer_address, prescription_months, months_taken, prescription_notes, payment_mode, sub_qty, pcs_per_unit, ...rest } = sale;
+          const { customer_name, customer_phone, customer_address, prescription_months, months_taken, payment_mode, sub_qty, pcs_per_unit, ...rest } = sale;
           return rest;
         });
 
         const fallbackResult = await supabase.from('sales').insert(fallbackSalesToInsert);
         error = fallbackResult.error;
 
-        // If the fallback also fails, show a more specific error message
         if (error) {
           throw new Error("The database needs to be updated. Please run the required migrations in Supabase.");
         } else {
-          // If fallback succeeds, show a warning
           toast({
             title: "Sale recorded",
-            description: `Sale of ${selectedProducts.length} item(s) recorded successfully${customerName ? ' for ' + customerName : ''}. Note: Some fields could not be saved due to missing database columns.`,
+            description: `Sale of ${selectedProducts.length} item(s) recorded successfully. Note: Some fields could not be saved.`,
           });
         }
       } else if (error) {
-        // Some other error occurred
         throw error;
       } else {
-        // Success with customer info
         toast({
           title: "Sale recorded",
           description: `Sale of ${selectedProducts.length} item(s) recorded successfully${customerName ? ' for ' + customerName : ''}`,
@@ -505,14 +510,11 @@ export default function Sales() {
       setSelectedProducts([]);
       setCurrentProduct('');
       setCurrentQuantity(1);
-      // Reset customer details
       setCustomerName('');
       setCustomerPhone('');
       setCustomerAddress('');
       setPrescriptionMonths('');
       setMonthsTaken(1);
-      setPrescriptionNotes('');
-      // Reset discount and custom rates
       setDiscountPercentage(0);
       setProductPrices({});
       setCustomGstRates({});
@@ -521,15 +523,12 @@ export default function Sales() {
       setPcsPerUnitMap({});
       setCurrentSubQty('');
       setCurrentPcsPerUnit(10);
-      // Refresh data after recording sale
       fetchData();
     } catch (error: any) {
       toast({
         variant: "destructive",
         title: "Error recording sale",
-        description: error.message.includes('customer_name') || error.message.includes('column')
-          ? "The database needs to be updated to support customer information. Please ask your administrator to apply the required database migration from the Supabase dashboard."
-          : error.message,
+        description: error.message,
       });
     } finally {
       setIsRecordingSales(false);
@@ -628,8 +627,7 @@ export default function Sales() {
           sale_date: sale.sale_date,
           total_amount: 0,
           gst_amount: 0,
-          items: [],
-          prescription_notes: sale.prescription_notes
+          items: []
         };
       }
       
@@ -1072,6 +1070,7 @@ Thank you for your purchase!
                     <SelectItem value="cash">💵 Cash</SelectItem>
                     <SelectItem value="upi">📱 UPI</SelectItem>
                     <SelectItem value="card">💳 Card</SelectItem>
+                    <SelectItem value="credit">⏳ Credit / Dues</SelectItem>
                     <SelectItem value="net_banking">🏦 Net Banking</SelectItem>
                     <SelectItem value="wallet">👛 Wallet</SelectItem>
                     <SelectItem value="cheque">📝 Cheque</SelectItem>
@@ -1119,16 +1118,6 @@ Thank you for your purchase!
                       className="py-2 px-3 w-full"
                     />
                   </div>
-                  <div className="space-y-2 sm:col-span-3">
-                    <Label htmlFor="customerAddress" className="text-sm font-medium">Address</Label>
-                    <Input
-                      id="customerAddress"
-                      value={customerAddress}
-                      onChange={(e) => setCustomerAddress(e.target.value)}
-                      placeholder="Enter address"
-                      className="py-2 px-3 w-full"
-                    />
-                  </div>
                 </div>
                 <div className="bg-emerald-50/50 p-4 rounded-xl border border-emerald-100 space-y-4">
                   <h4 className="text-sm font-bold text-emerald-700 flex items-center gap-2">
@@ -1159,13 +1148,13 @@ Thank you for your purchase!
                         className="bg-white border-emerald-200 focus:border-emerald-500 shadow-sm"
                       />
                     </div>
-                    <div className="space-y-2 sm:col-span-1 lg:col-span-1">
-                      <Label htmlFor="prescriptionNotes" className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider">Special Instructions</Label>
+                    <div className="space-y-2 sm:col-span-1 lg:col-span-2">
+                      <Label htmlFor="customerAddress" className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider">Address</Label>
                       <Input
-                        id="prescriptionNotes"
-                        value={prescriptionNotes}
-                        onChange={(e) => setPrescriptionNotes(e.target.value)}
-                        placeholder="Optional notes..."
+                        id="customerAddress"
+                        value={customerAddress}
+                        onChange={(e) => setCustomerAddress(e.target.value)}
+                        placeholder="Enter customer address..."
                         className="bg-white border-emerald-200 focus:border-emerald-500 shadow-sm"
                       />
                     </div>
@@ -1242,10 +1231,8 @@ Thank you for your purchase!
                     setCurrentQuantity(1);
                     setCustomerName('');
                     setCustomerPhone('');
-                    setCustomerAddress('');
                     setPrescriptionMonths('');
                     setMonthsTaken('');
-                    setPrescriptionNotes('');
                     setDiscountPercentage(0);
                     setProductPrices({});
                     setCustomGstRates({});
@@ -1318,6 +1305,7 @@ Thank you for your purchase!
                       <TableHead className="text-lg font-bold text-gray-700 py-4">Phone</TableHead>
                       <TableHead className="text-lg font-bold text-gray-700 py-4">Total Items</TableHead>
                       <TableHead className="text-lg font-bold text-gray-700 py-4">Total Amount</TableHead>
+                      <TableHead className="text-lg font-bold text-gray-700 py-4">Payment</TableHead>
                       <TableHead className="text-lg font-bold text-gray-700 py-4">Date</TableHead>
                       <TableHead className="text-lg font-bold text-gray-700 py-4">Actions</TableHead>
                     </TableRow>
@@ -1342,6 +1330,20 @@ Thank you for your purchase!
                           <TableCell className="text-lg py-4">{group.customer_phone}</TableCell>
                           <TableCell className="text-lg py-4">{group.items.length} product(s)</TableCell>
                           <TableCell className="text-lg py-4 font-bold text-green-600">₹{group.total_amount.toFixed(2)}</TableCell>
+                          <TableCell className="text-lg py-4">
+                            <Badge 
+                              variant={group.items[0]?.payment_mode === 'credit' ? 'destructive' : 'secondary'}
+                              className={`text-sm py-1 px-3 capitalize ${
+                                group.items[0]?.payment_mode === 'credit' 
+                                  ? 'bg-orange-100 text-orange-700 hover:bg-orange-200 border-orange-200' 
+                                  : group.items[0]?.payment_mode === 'cash'
+                                  ? 'bg-green-100 text-green-700 hover:bg-green-200 border-green-200'
+                                  : 'bg-blue-100 text-blue-700 hover:bg-blue-200 border-blue-200'
+                              }`}
+                            >
+                              {group.items[0]?.payment_mode || 'cash'}
+                            </Badge>
+                          </TableCell>
                           <TableCell className="text-lg py-4">{new Date(group.sale_date || group.created_at).toLocaleDateString()}</TableCell>
                           <TableCell className="text-lg py-4" onClick={(e) => e.stopPropagation()}>
                             <div className="flex gap-2">

@@ -259,13 +259,14 @@ export default function Products() {
     const pcsPerUnitRaw = formData.get('pcs_per_unit') as string;
     const pcsPerUnitVal = pcsPerUnitRaw ? parseInt(pcsPerUnitRaw) : null;
 
+    const expDateRaw = formData.get('expiry_date') as string;
     const productData = {
       name: formData.get('name') as string,
       hsn_code: formData.get('hsn_code') as string,
       category: formData.get('category') as string,
       batch_number: formData.get('batch_number') as string,
       manufacturer: formData.get('manufacturer') as string,
-      expiry_date: (formData.get('expiry_date') as string) || null,
+      expiry_date: expDateRaw && expDateRaw.length === 7 ? `${expDateRaw}-01` : (expDateRaw || null),
       quantity: parseInt(formData.get('quantity') as string),
       purchase_price: parseFloat(formData.get('purchase_price') as string),
       selling_price: parseFloat(formData.get('selling_price') as string),
@@ -889,12 +890,12 @@ export default function Products() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="expiry_date" className="text-lg font-medium">Expiry Date</Label>
+                  <Label htmlFor="expiry_date" className="text-lg font-medium">Expiry</Label>
                   <Input
                     id="expiry_date"
                     name="expiry_date"
-                    type="date"
-                    defaultValue={editingProduct?.expiry_date ? editingProduct.expiry_date.substring(0, 10) : ''}
+                    type="month"
+                    defaultValue={editingProduct?.expiry_date ? editingProduct.expiry_date.substring(0, 7) : ''}
                     className="text-lg py-3 px-4"
                   />
                 </div>
@@ -1224,7 +1225,10 @@ export default function Products() {
                               return diffDays <= 30 ? "text-red-500 font-bold" : "text-muted-foreground";
                             })()
                           )}>
-                            Exp: {product.expiry_date ? new Date(product.expiry_date).toLocaleDateString() : '-'}
+                            Exp: {product.expiry_date ? (() => {
+                              const d = new Date(product.expiry_date);
+                              return `${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+                            })() : '-'}
                           </span>
                         </div>
                       </TableCell>

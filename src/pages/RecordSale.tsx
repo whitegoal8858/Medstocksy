@@ -121,10 +121,9 @@ export default function RecordSale() {
   const [billDate, setBillDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
   const [prescriptionMonths, setPrescriptionMonths] = useState<number | ''>('');
   const [monthsTaken, setMonthsTaken] = useState<number | ''>(1);
-  const [prescriptionNotes, setPrescriptionNotes] = useState('');
 
   // ─── CRM Retrieve Dialog ─────────────────────────────────────────────────
-  type CrmField = 'name' | 'address' | 'doctor' | 'prescription_months' | 'months_taken' | 'notes';
+  type CrmField = 'name' | 'address' | 'doctor' | 'prescription_months' | 'months_taken';
   interface CrmBillItem {
     item_key: string;       // product_id used as unique key
     product_id: string;
@@ -147,7 +146,6 @@ export default function RecordSale() {
     doctor_name?: string | null;
     prescription_months?: number | null;
     months_taken?: number | null;
-    prescription_notes?: string | null;
     bill_date?: string | null;
     bill_id?: string | null;
     items: CrmBillItem[];
@@ -159,6 +157,7 @@ export default function RecordSale() {
 
   // ─── Payment ────────────────────────────────────────────────────────────
   const [paymentMode, setPaymentMode] = useState('cash');
+  const [receivedAmount, setReceivedAmount] = useState<number | ''>('');
   const [globalDiscount, setGlobalDiscount] = useState(0);
 
   // ─── Rows ───────────────────────────────────────────────────────────────
@@ -225,7 +224,7 @@ export default function RecordSale() {
       // Step 1: most-recent bill header (for customer details)
       let headerQuery = (supabase as any)
         .from('sales')
-        .select('bill_id, customer_name, customer_address, doctor_name, sale_date, prescription_months, months_taken, prescription_notes, created_at')
+        .select('bill_id, customer_name, customer_address, doctor_name, sale_date, prescription_months, months_taken, created_at')
         .order('created_at', { ascending: false })
         .limit(1);
 
@@ -273,7 +272,7 @@ export default function RecordSale() {
               pcs_per_unit: r.pcs_per_unit ?? null,
               unit_price: r.unit_price || 0,
               batch: r.products?.batch_number || '',
-              expiry: r.products?.expiry_date ? r.products.expiry_date.substring(0, 10) : '',
+              expiry: r.products?.expiry_date ? r.products.expiry_date.substring(0, 7) : '',
               hsn: r.products?.hsn_code || '',
               gst: r.products?.gst || 0,
               discount: r.discount_percentage || 0,
@@ -295,7 +294,6 @@ export default function RecordSale() {
       if (header.doctor_name) available.add('doctor');
       if (header.prescription_months != null) available.add('prescription_months');
       if (header.months_taken != null) available.add('months_taken');
-      if (header.prescription_notes) available.add('notes');
 
       if (available.size > 0 || items.length > 0) {
         setCrmFoundData({
@@ -304,7 +302,6 @@ export default function RecordSale() {
           doctor_name: header.doctor_name,
           prescription_months: header.prescription_months,
           months_taken: header.months_taken,
-          prescription_notes: header.prescription_notes,
           bill_date: header.sale_date || header.created_at?.substring(0, 10),
           bill_id: lastBillId,
           items,
@@ -343,7 +340,6 @@ export default function RecordSale() {
     if (crmSelectedFields.has('address') && crmFoundData.customer_address) setCustomerAddress(crmFoundData.customer_address);
     if (crmSelectedFields.has('doctor') && crmFoundData.doctor_name) setDoctorName(crmFoundData.doctor_name);
     if (crmSelectedFields.has('prescription_months') && crmFoundData.prescription_months != null) setPrescriptionMonths(crmFoundData.prescription_months);
-    if (crmSelectedFields.has('notes') && crmFoundData.prescription_notes) setPrescriptionNotes(crmFoundData.prescription_notes);
 
     // ── Auto-increment months_taken when same medicines selected ──
     // Check if selected items == last bill's items (same prescription repeat)
@@ -493,7 +489,7 @@ export default function RecordSale() {
       productName: product.name,
       stock: product.quantity,
       batch: product.batch_number || '',
-      expiry: product.expiry_date ? product.expiry_date.substring(0, 10) : '',
+      expiry: product.expiry_date ? product.expiry_date.substring(0, 7) : '',
       hsn: product.hsn_code || '',
       mrp: product.selling_price,
       rate: product.selling_price,
@@ -514,7 +510,7 @@ export default function RecordSale() {
       productName: product.name,
       stock: product.quantity,
       batch: product.batch_number || '',
-      expiry: product.expiry_date ? product.expiry_date.substring(0, 10) : '',
+      expiry: product.expiry_date ? product.expiry_date.substring(0, 7) : '',
       hsn: product.hsn_code || '',
       mrp: product.selling_price,
       rate: product.selling_price,
@@ -617,6 +613,27 @@ export default function RecordSale() {
     };
   }, [rows, settings, globalDiscount]);
 
+  // Sync receivedAmount:
+  // - Cash/UPI/Card: auto-fill to grand total (can be overridden for partial)
+  // - Credit: keep at 0 by default, but DON'T reset if user has typed a partial amount
+  useEffect(() => {
+    if (paymentMode !== 'credit') {
+      setReceivedAmount(totals.grandTotal);
+    } else {
+      // Only set to 0 when switching TO credit mode — handled by the paymentMode change below
+    }
+  }, [totals.grandTotal]);
+
+  // When payment mode changes, reset receivedAmount appropriately
+  useEffect(() => {
+    if (paymentMode === 'credit') {
+      setReceivedAmount(0); // Start credit with 0 paid (user can type partial amount)
+    } else {
+      setReceivedAmount(totals.grandTotal); // Cash/UPI/Card: default to full
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paymentMode]);
+
   // ─── Handle Save ──────────────────────────────────────────────────────
   const handleSave = useCallback(async () => {
     const validRows = rows.filter(r => r.productId);
@@ -625,11 +642,31 @@ export default function RecordSale() {
       return;
     }
     if (isSaving) return;
+
+    // Validation for Credit sales
+    if (paymentMode === 'credit') {
+      if (!customerName.trim() || !customerPhone.trim()) {
+        toast({
+          variant: 'destructive',
+          title: 'Customer Info Required',
+          description: 'Name and Phone number are mandatory for credit sales.',
+        });
+        return;
+      }
+    }
+
     setIsSaving(true);
 
     try {
       const billId = crypto.randomUUID();
       const isGstInclusive = settings?.gst_type === 'inclusive';
+
+      // receivedNum = how much the customer actually paid right now (can be 0 for pure credit,
+      // or a partial amount even on credit mode — e.g. ₹200 upfront on a ₹500 credit sale)
+      const receivedNum = receivedAmount !== '' ? Number(receivedAmount) : 0;
+
+      // Settled = fully paid (applies to ALL modes including credit with full upfront payment)
+      const isFullPayment = receivedNum >= totals.grandTotal && totals.grandTotal > 0;
 
       const salesToInsert = validRows.map(row => {
         // Full strips + loose tablets
@@ -657,6 +694,20 @@ export default function RecordSale() {
         }
 
         const hasSubQty = row.subQty !== '' && Number(row.subQty) > 0;
+        const totalPriceRounded = Math.round(finalTotal);
+        
+        // received_amount per row, distributed proportionally:
+        // - Pure credit (receivedNum=0) → 0 per row → full due shows in CustomerRelation
+        // - Partial upfront (e.g. ₹200 of ₹500) → proportional per row → ₹300 due shows
+        // - Full payment → match total_price exactly to avoid rounding dust
+        let rowReceivedAmount = 0;
+        if (isFullPayment) {
+          rowReceivedAmount = totalPriceRounded; // Paid in full — match total exactly
+        } else if (receivedNum > 0 && totals.grandTotal > 0) {
+          // Partial payment — distribute proportionally across rows
+          rowReceivedAmount = receivedNum * (finalTotal / totals.grandTotal);
+        }
+        // else receivedNum === 0 → rowReceivedAmount stays 0 (pure credit, nothing paid)
 
         return {
           account_id: profile?.account_id,
@@ -667,18 +718,20 @@ export default function RecordSale() {
           sub_qty: hasSubQty ? Number(row.subQty) : null,
           pcs_per_unit: hasSubQty ? row.pcsPerUnit : null,
           unit_price: Math.round(row.rate * 100) / 100,
-          total_price: Math.round(finalTotal),
+          total_price: totalPriceRounded,
           gst_amount: Math.round(finalGst * 100) / 100,
           payment_mode: paymentMode,
           customer_name: customerName || 'Walk-in Customer',
           customer_phone: customerPhone || null,
           customer_address: customerAddress || null,
           doctor_name: doctorName || null,
-          sale_date: billDate, // Store the user-edited date as the primary sale_date
+          sale_date: billDate,
           prescription_months: prescriptionMonths === '' ? null : Number(prescriptionMonths),
           months_taken: monthsTaken === '' ? null : Number(monthsTaken),
-          prescription_notes: prescriptionNotes || null,
           discount_percentage: row.discount + globalDiscount,
+          received_amount: Math.round(rowReceivedAmount * 100) / 100,
+          // Settled when customer has paid the full amount (works for all payment modes)
+          is_settled: isFullPayment,
         };
       });
 
@@ -687,7 +740,7 @@ export default function RecordSale() {
       if (error && error.message?.includes('column')) {
         // Fallback without optional fields
         const fallback = salesToInsert.map(s => {
-          const { customer_name, customer_phone, customer_address, doctor_name, prescription_months, months_taken, prescription_notes, payment_mode, sub_qty, pcs_per_unit, ...rest } = s;
+          const { customer_name, customer_phone, customer_address, doctor_name, prescription_months, months_taken, payment_mode, sub_qty, pcs_per_unit, ...rest } = s as any;
           return rest;
         });
         const res2 = await supabase.from('sales').insert(fallback);
@@ -709,7 +762,7 @@ export default function RecordSale() {
     } finally {
       setIsSaving(false);
     }
-  }, [rows, settings, globalDiscount, paymentMode, customerName, customerPhone, customerAddress, doctorName, billDate, prescriptionMonths, monthsTaken, prescriptionNotes, profile, navigate, toast, isSaving]);
+  }, [rows, settings, globalDiscount, paymentMode, receivedAmount, totals, customerName, customerPhone, customerAddress, doctorName, billDate, prescriptionMonths, monthsTaken, profile, navigate, toast, isSaving]);
 
   // ─── Keyboard shortcuts (global) ──────────────────────────────────────
   useEffect(() => {
@@ -885,7 +938,6 @@ export default function RecordSale() {
                 { field: 'doctor' as CrmField, label: 'Doctor', value: crmFoundData.doctor_name },
                 { field: 'prescription_months' as CrmField, label: 'Months Prescribed', value: crmFoundData.prescription_months != null ? `${crmFoundData.prescription_months} months` : null },
                 { field: 'months_taken' as CrmField, label: 'Months Taken', value: crmFoundData.months_taken != null ? `${crmFoundData.months_taken} months` : null },
-                { field: 'notes' as CrmField, label: 'Notes', value: crmFoundData.prescription_notes },
               ].filter(item => item.value != null).length > 0 && (
                   <div>
                     <div className="flex items-center justify-between mb-2">
@@ -894,7 +946,7 @@ export default function RecordSale() {
                         type="button"
                         className="text-xs text-green-700 font-medium hover:underline"
                         onClick={() => {
-                          const all = new Set<CrmField>(['name', 'address', 'doctor', 'prescription_months', 'months_taken', 'notes']);
+                          const all = new Set<CrmField>(['name', 'address', 'doctor', 'prescription_months', 'months_taken']);
                           setCrmSelectedFields(all);
                         }}
                       >Select All</button>
@@ -906,7 +958,6 @@ export default function RecordSale() {
                         { field: 'doctor' as CrmField, label: 'Doctor', value: crmFoundData.doctor_name },
                         { field: 'prescription_months' as CrmField, label: 'Months Prescribed', value: crmFoundData.prescription_months != null ? `${crmFoundData.prescription_months} months` : null },
                         { field: 'months_taken' as CrmField, label: 'Months Taken', value: crmFoundData.months_taken != null ? `${crmFoundData.months_taken} months` : null },
-                        { field: 'notes' as CrmField, label: 'Notes', value: crmFoundData.prescription_notes },
                       ]).filter(item => item.value != null).map(item => (
                         <button
                           key={item.field}
@@ -1263,12 +1314,12 @@ export default function RecordSale() {
 
                 <div className="flex items-center gap-3 flex-1 min-w-0">
                   <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider shrink-0">
-                    <Receipt className="h-3 w-3 inline mr-1 opacity-70" />Notes:
+                    <Receipt className="h-3 w-3 inline mr-1 opacity-70" />Address:
                   </span>
                   <input 
-                    value={prescriptionNotes} 
-                    onChange={e => setPrescriptionNotes(e.target.value)} 
-                    placeholder="Specific patient instructions, dosage schedules, next visit info..." 
+                    value={customerAddress} 
+                    onChange={e => setCustomerAddress(e.target.value)} 
+                    placeholder="Enter customer address..." 
                     className="flex-1 h-7 bg-white/70 border border-emerald-200 rounded px-3 outline-none focus:border-emerald-500 focus:bg-white text-emerald-900 placeholder-emerald-300 font-medium transition-all text-xs" 
                   />
                 </div>
@@ -1369,12 +1420,12 @@ export default function RecordSale() {
                   <div className="px-0.5">
                     <Input
                       ref={el => setFieldRef(row.uid, 'expiry', el)}
-                      type="date"
+                      type="month"
                       value={row.expiry}
                       onChange={e => updateRow(idx, { expiry: e.target.value })}
                       onKeyDown={e => handleFieldKeyDown(e, idx, 'expiry')}
                       disabled={!row.productId}
-                      className="h-8 text-[10px] px-1 font-semibold bg-transparent border-transparent hover:bg-white focus:bg-white focus:border-emerald-400 transition-all shadow-none text-gray-500 appearance-none"
+                      className="h-8 text-[11px] px-1 font-semibold bg-transparent border-transparent hover:bg-white focus:bg-white focus:border-emerald-400 transition-all shadow-none text-gray-500 appearance-none"
                     />
                   </div>
 
@@ -1500,6 +1551,36 @@ export default function RecordSale() {
                 placeholder="0"
               />
             </div>
+
+            <div className={`flex items-center gap-2 bg-white px-3 py-1.5 rounded-md border transition-all ${paymentMode === 'credit' ? 'border-orange-200 bg-orange-50' : 'border-green-100'}`}>
+              <Label className={`text-xs font-medium ${paymentMode === 'credit' ? 'text-orange-700' : 'text-green-700'}`}>
+                {paymentMode === 'credit' ? 'Amt Paid' : 'Received'}
+              </Label>
+              <Input
+                type="number"
+                min="0"
+                step="0.01"
+                value={receivedAmount}
+                onChange={e => setReceivedAmount(e.target.value === '' ? '' : parseFloat(e.target.value) || 0)}
+                className={`w-20 h-8 text-sm font-bold border-none shadow-none bg-transparent focus:ring-0 text-right ${paymentMode === 'credit' ? 'text-orange-900' : 'text-green-900'}`}
+                placeholder="0.00"
+              />
+            </div>
+
+            {/* Live due amount indicator for partial / credit payments */}
+            {(() => {
+              const paid = receivedAmount !== '' ? Number(receivedAmount) : 0;
+              const due = totals.grandTotal - paid;
+              if (due > 0.01) {
+                return (
+                  <div className="flex flex-col items-center px-3 py-1 rounded-md bg-red-50 border border-red-200 min-w-[80px]">
+                    <span className="text-[9px] font-bold text-red-400 uppercase tracking-wider">Due</span>
+                    <span className="text-sm font-black text-red-600">₹{Math.round(due * 100) / 100}</span>
+                  </div>
+                );
+              }
+              return null;
+            })()}
           </div>
 
           {/* Right: Summary & Action */}

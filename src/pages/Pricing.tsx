@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { supabase } from "@/db conn/supabaseClient";
 import { Check, X } from "lucide-react";
@@ -8,6 +8,21 @@ import { Badge } from "@/components/ui/badge";
 
 const Pricing = () => {
     const [isAnnual, setIsAnnual] = useState(false);
+
+    useEffect(() => {
+        // Dynamically load Razorpay script only when entering the Pricing page
+        const script = document.createElement("script");
+        script.src = "https://checkout.razorpay.com/v1/checkout.js";
+        script.async = true;
+        document.body.appendChild(script);
+
+        return () => {
+            // Clean up: remove the script if we leave the page (optional, but keep it clean)
+            if (document.body.contains(script)) {
+                document.body.removeChild(script);
+            }
+        };
+    }, []);
 
     const plans = [
         {
